@@ -1,6 +1,7 @@
+
 # Backend: FastAPI + the Delhi/Kushak scientific core.
-# The evidence data tree (data/) is mounted at runtime, not baked in:
-# it is locally-acquired provenance and must stay out of images.
+# Scientific evidence/data required by the application is bundled
+# into the backend image so the Render deployment can access it.
 FROM python:3.12-slim
 
 # Runtime dependency required by Rasterio/GDAL
@@ -19,6 +20,7 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 COPY backend /app/backend
 COPY scripts /app/scripts
 COPY main.py /app/main.py
+COPY data /app/data
 
 EXPOSE 8000
 

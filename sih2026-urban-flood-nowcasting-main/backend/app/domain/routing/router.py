@@ -135,6 +135,7 @@ def calculate_flood_safe_route(
     end_lat: float,
     horizon: str = "+1h",
     affected_roads: Optional[List[AffectedRoad]] = None,
+    hazard_description: Optional[str] = None,
 ) -> SafeRouteResponse:
     """
     Calculate an optimal flood-safe route between origin and destination coordinates.
@@ -145,8 +146,15 @@ def calculate_flood_safe_route(
     4. Computes the flood-safe path, excluding roads >= HIGH risk and penalizing LOW/MEDIUM roads.
     5. Identifies flooded roads avoided by taking the detour.
     6. Returns structured response with safety status, distance, travel cost, and GeoJSON geometry.
+
+    The hazard the route was evaluated against is supplied by the caller as `affected_roads`;
+    `hazard_description` states which hazard that was so the response can disclose it.
     """
     graph = RoadGraph.get_instance()
+
+    provenance = dict(PROVENANCE_DISCLOSURES)
+    if hazard_description:
+        provenance["hazard_assessment"] = hazard_description
 
     # 1. Snap coordinates to network
     start_node, start_snap = graph.snap_coordinate(start_lon, start_lat)
@@ -182,7 +190,7 @@ def calculate_flood_safe_route(
             horizon=horizon,
             start_snapped_to=start_snap,
             end_snapped_to=end_snap,
-            provenance=PROVENANCE_DISCLOSURES,
+            provenance=provenance,
         )
 
     # Analyze direct path flood impact
@@ -200,6 +208,10 @@ def calculate_flood_safe_route(
         max_flood_depth_m=round(direct_max_depth, 3),
         has_flooded_roads=len(direct_flooded_road_ids) > 0,
         flooded_road_count=len(direct_flooded_road_ids),
+        geometry={
+            "type": "LineString",
+            "coordinates": _build_merged_linestring_coords(direct_edges),
+        },
     )
 
     # 4. Compute flood-safe route (HIGH & CRITICAL roads excluded; MEDIUM & LOW penalized)
@@ -232,7 +244,7 @@ def calculate_flood_safe_route(
             horizon=horizon,
             start_snapped_to=start_snap,
             end_snapped_to=end_snap,
-            provenance=PROVENANCE_DISCLOSURES,
+            provenance=provenance,
         )
 
     # 5. Build route segments and calculate metrics
@@ -289,5 +301,5 @@ def calculate_flood_safe_route(
         horizon=horizon,
         start_snapped_to=start_snap,
         end_snapped_to=end_snap,
-        provenance=PROVENANCE_DISCLOSURES,
+        provenance=provenance,
     )

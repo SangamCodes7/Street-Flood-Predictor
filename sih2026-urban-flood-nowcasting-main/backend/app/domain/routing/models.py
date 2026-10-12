@@ -32,6 +32,7 @@ class ShortestPathComparison(BaseModel):
     max_flood_depth_m: float = Field(0.0, ge=0, description="Peak flood depth along direct shortest path [m]")
     has_flooded_roads: bool = Field(False, description="True if direct shortest path traverses flooded roads")
     flooded_road_count: int = Field(0, description="Number of flooded road segments on direct shortest path")
+    geometry: Optional[Dict[str, Any]] = Field(None, description="GeoJSON LineString of the unconstrained direct path (EPSG:4326), drawn for comparison against the safe route")
 
 
 class SnappedPoint(BaseModel):

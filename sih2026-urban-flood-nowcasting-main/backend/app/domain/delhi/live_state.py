@@ -644,14 +644,23 @@ def _state_payload(
     streets = _street_intelligence(step, structure, horizon)
 
     max_depth_m = round(step.max_depth_m, 3)
-    if max_depth_m >= ROAD_RISK_THRESHOLDS_M["CRITICAL"]:
-        risk_text, risk_desc = "SEVERE", "Major inundation • significant roadway disruption"
-    elif max_depth_m >= ROAD_RISK_THRESHOLDS_M["HIGH"]:
-        risk_text, risk_desc = "HIGH", "Curb overflow • street flooding in low-lying areas"
-    elif step.flooded_cells > 0:
-        risk_text, risk_desc = "MODERATE", "Localized waterlogging in terrain depressions"
+    # Peak areal depth is labelled with the canonical depth bands that already
+    # colour the map (classify_depth_cm), never with the road-passability
+    # tiers in ROAD_RISK_THRESHOLDS_M — those describe individual road
+    # segments and are applied to segments, not to an areal peak depth.
+    depth_state = classify_depth_cm(max_depth_m * 100.0)
+    if depth_state == "SEVERE":
+        risk_text, risk_desc = "SEVERE", "60 cm + band • deepest modelled ponding on the 30 m grid"
+    elif depth_state == "DEEP":
+        risk_text, risk_desc = "DEEP", "30 – 60 cm band • deep ponding in the lowest modelled cells"
+    elif depth_state == "MODERATE":
+        risk_text, risk_desc = "MODERATE", "10 – 30 cm band • widespread surface water in low-lying cells"
+    elif depth_state == "SHALLOW":
+        risk_text, risk_desc = "SHALLOW", "2 – 10 cm band • shallow ponding in terrain depressions"
+    elif depth_state == "UNKNOWN":
+        risk_text, risk_desc = "UNKNOWN", "No defensible depth classification for this step"
     else:
-        risk_text, risk_desc = "NO INUNDATION", "Runoff conveyed by inlets • no surface ponding"
+        risk_text, risk_desc = "NO INUNDATION", "Below the 2 cm band threshold • no meaningful surface ponding"
 
     payload = {
         "horizon": horizon,

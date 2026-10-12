@@ -6,6 +6,7 @@ import {
   type DrainageGraphResponse,
   type GeoLayerResponse,
   type SafeRouteResponse,
+  type ScenarioSafeRouteResponse,
   type SurfaceHotspot,
 } from '../../api/delhi';
 import RainOverlay from './RainOverlay';
@@ -99,7 +100,10 @@ const DelhiMap = ({
   theme,
 }: {
   flowState: MapFlowState | null;
-  routeResult?: SafeRouteResponse | null;
+  // LIVE/HISTORICAL nowcast route or WHAT-IF scenario route — the map draws
+  // the same geometry + risk segments for either; the mode only decides
+  // which hazard state those segments were evaluated against.
+  routeResult?: SafeRouteResponse | ScenarioSafeRouteResponse | null;
   routePicks?: { origin: RoutePickPoint | null; destination: RoutePickPoint | null };
   pickTarget?: 'origin' | 'destination' | null;
   onMapClick?: (lonlat: [number, number]) => void;
@@ -108,7 +112,10 @@ const DelhiMap = ({
   surfaceHotspots?: SurfaceHotspot[];
   depthCells?: { lon: number; lat: number; depth_cm: number; flood_state: string; provenance: string }[];
   depthPolygons?: { type: string; features: unknown[] } | null;
-  scenarioRoadDepths?: Record<string, { depth_cm: number; depth_m: number; flood_state: string }> | null;
+  scenarioRoadDepths?: Record<
+    string,
+    { depth_cm: number | null; depth_m: number | null; water_depth_state: string }
+  > | null;
   streetRisk?: { roads_geojson: { type: string; features: unknown[] }; intersections_geojson: { type: string; features: unknown[] } } | null;
   theme?: MapTheme;
 }) => {
@@ -444,7 +451,7 @@ const DelhiMap = ({
           </div>
           <div class="popup-body">
             <div class="popup-row"><span class="lbl">Street:</span><span class="val bold">${p.name || 'Unnamed'}</span></div>
-            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold" style="color:#c2410c">${Number(p.max_depth_m).toFixed(2)} m (${Math.round(Number(p.max_depth_m) * 100)} cm)</span></div>
+            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold" style="color:#c2410c">${Math.round(Number(p.max_depth_m) * 100)} cm</span></div>
             ${trendRow(p)}
             <div class="popup-row"><span class="lbl">Flooded corridor:</span><span class="val">${p.flooded_length_m} m</span></div>
             <div class="popup-row"><span class="lbl">Road geometry:</span><span class="val">OpenStreetMap (ODbL)</span></div>
@@ -462,7 +469,7 @@ const DelhiMap = ({
           <div class="popup-body">
             <div class="popup-row"><span class="lbl">Junction:</span><span class="val bold">${p.name || 'Junction'}</span></div>
             <div class="popup-row"><span class="lbl">Cross streets:</span><span class="val">${p.roads_display || p.name || ''}</span></div>
-            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold" style="color:#c2410c">${Number(p.max_depth_m).toFixed(2)} m (${Math.round(Number(p.max_depth_m) * 100)} cm)</span></div>
+            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold" style="color:#c2410c">${Math.round(Number(p.max_depth_m) * 100)} cm</span></div>
             ${trendRow(p)}
             <div class="popup-row"><span class="lbl">Topology:</span><span class="val">OpenStreetMap (ODbL)</span></div>
             <div class="popup-row"><span class="lbl">Depth source:</span><span class="val status-modelled">Modelled (V1 depth grid, 30 m DSM)</span></div>
@@ -477,7 +484,7 @@ const DelhiMap = ({
             <span class="popup-badge risk-mod">${p.flood_state || ''}</span>
           </div>
           <div class="popup-body">
-            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold">${(Number(p.depth_cm) / 100).toFixed(2)} m (${Math.round(Number(p.depth_cm))} cm)</span></div>
+            <div class="popup-row"><span class="lbl">Predicted depth:</span><span class="val bold">${Math.round(Number(p.depth_cm))} cm</span></div>
             <div class="popup-row"><span class="lbl">Data status:</span><span class="val status-modelled">SIMULATED MODEL OUTPUT</span></div>
             <div class="popup-row"><span class="lbl">Basis:</span><span class="val">V1 reference model • enforced 30 m DSM</span></div>
           </div>
@@ -565,7 +572,7 @@ const DelhiMap = ({
         ...f,
         properties: {
           ...f.properties,
-          flood_state: d ? d.flood_state : 'DRY',
+          flood_state: d ? d.water_depth_state : 'DRY',
           depth_cm: d ? d.depth_cm : 0,
         },
       };
@@ -812,7 +819,7 @@ const DelhiMap = ({
         ...f,
         properties: {
           ...f.properties,
-          flood_state: d ? d.flood_state : 'DRY',
+          flood_state: d ? d.water_depth_state : 'DRY',
           depth_cm: d ? d.depth_cm : 0,
         },
       };
@@ -936,7 +943,10 @@ const DelhiMap = ({
             </span>
           )}
           <span className="legend-row">
-            <i className="lg-route elevated" /> ELEVATED-RISK (model-derived loading)
+            <i className="lg-route elevated" />
+            {routeResult.mode === 'SCENARIO'
+              ? 'ELEVATED-RISK (modelled scenario depth)'
+              : 'ELEVATED-RISK (model-derived loading)'}
           </span>
           <span className="legend-row">
             <i className="lg-route unknown" /> UNKNOWN (no model coverage — not safe)

@@ -13,6 +13,7 @@ import {
   type DrainageGraphResponse,
   type LiveStateResponse,
   type SafeRouteResponse,
+  type ScenarioSafeRouteResponse,
   type StreetsIntel,
   type SurfaceHotspot,
   type WhatIfResponse,
@@ -20,6 +21,19 @@ import {
 
 type Mode = 'LIVE' | 'SCENARIO' | 'REPLAY';
 type Horizon = 'NOW' | '+1h' | '+2h' | '+3h';
+
+// A computed route is either the LIVE/HISTORICAL route or a WHAT-IF scenario
+// route. Both come from the same deterministic routing core (same Dijkstra,
+// same risk penalties); they differ only in which hazard state the segments
+// were evaluated against, so each arm carries only its own mode's evidence.
+type DelhiRouteResult = SafeRouteResponse | ScenarioSafeRouteResponse;
+
+// What a route must be computed against: the live nowcast horizon, the
+// replayed event timestep, or the scenario intensity currently displayed.
+type RouteContext =
+  | { mode: 'live' }
+  | { mode: 'historical'; replay: { eventId: string; timestepIndex: number } }
+  | { mode: 'scenario'; rainfallMmH: number };
 
 const HORIZONS: Horizon[] = ['NOW', '+1h', '+2h', '+3h'];
 const SCENARIO_PRESETS = [20, 40, 50, 70];
@@ -39,24 +53,30 @@ const EMPTY_FLOW: MapFlowState = {
   rainKnown: false,
 };
 
-// V1 flood-depth legend ramp (identical to the Mumbai FloodMap legend).
+// Delhi V1 depth classification (backend/app/domain/delhi/scenarios/config.py
+// DEPTH_THRESHOLDS_CM + depth_v1.py V1_DEPTH_COLORS). These are DEMO/UI
+// classification thresholds for the modelled depth proxy — not hazard
+// standards, not observed thresholds, not a safety claim. The legend, the map
+// swatches and the hero badge must all read from this one table.
 const DEPTH_LEGEND = [
-  { color: '#ffeda0', range: '0.0 – 0.5 m', desc: 'Minor' },
-  { color: '#feb24c', range: '0.5 – 1.0 m', desc: 'Moderate' },
-  { color: '#f03b20', range: '1.0 – 2.0 m', desc: 'High' },
-  { color: '#bd0026', range: '2.0+ m', desc: 'Severe' },
+  { color: '#ffeda0', range: '2 – 10 cm', desc: 'SHALLOW' },
+  { color: '#feb24c', range: '10 – 30 cm', desc: 'MODERATE' },
+  { color: '#f03b20', range: '30 – 60 cm', desc: 'DEEP' },
+  { color: '#bd0026', range: '60 cm +', desc: 'SEVERE' },
 ];
 
 function riskBanner(maxDepthM: number | null): {
-  text: string; bg: string; border: string; color: string; desc: string;
+  text: string; bg: string; border: string; color: string; desc: string; legendColor: string;
 } {
   if (maxDepthM === null) {
-    return { text: 'UNKNOWN', bg: '#f8fafc', border: '#cbd5e1', color: '#475569', desc: 'No defensible model state for this step' };
+    return { text: 'UNKNOWN', bg: '#f8fafc', border: '#cbd5e1', color: '#475569', desc: 'No defensible model state for this step', legendColor: '#94a3b8' };
   }
-  if (maxDepthM >= 1.0) return { text: 'SEVERE', bg: '#fef2f2', border: '#f87171', color: '#991b1b', desc: 'Major inundation • significant roadway disruption' };
-  if (maxDepthM >= 0.5) return { text: 'HIGH', bg: '#fff7ed', border: '#fb923c', color: '#c2410c', desc: 'Curb overflow • street flooding in low-lying areas' };
-  if (maxDepthM > 0.0) return { text: 'MODERATE', bg: '#fefce8', border: '#facc15', color: '#854d0e', desc: 'Localized waterlogging in terrain depressions' };
-  return { text: 'NO INUNDATION', bg: '#f8fafc', border: '#cbd5e1', color: '#166534', desc: 'Runoff conveyed by drainage • no surface ponding' };
+  const cm = maxDepthM * 100;
+  if (cm >= 60) return { text: 'SEVERE', bg: '#fee2e2', border: '#f87171', color: '#991b1b', desc: '60 cm + band • deepest modelled ponding on the 30 m grid', legendColor: '#bd0026' };
+  if (cm >= 30) return { text: 'DEEP', bg: '#fef2f2', border: '#f87171', color: '#b91c1c', desc: '30 – 60 cm band • deep ponding in the lowest modelled cells', legendColor: '#f03b20' };
+  if (cm >= 10) return { text: 'MODERATE', bg: '#fff7ed', border: '#fb923c', color: '#c2410c', desc: '10 – 30 cm band • widespread surface water in low-lying cells', legendColor: '#feb24c' };
+  if (cm >= 2) return { text: 'SHALLOW', bg: '#fefce8', border: '#facc15', color: '#854d0e', desc: '2 – 10 cm band • shallow ponding in terrain depressions', legendColor: '#ffeda0' };
+  return { text: 'NO INUNDATION', bg: '#f8fafc', border: '#cbd5e1', color: '#166534', desc: 'Below the 2 cm band threshold • no meaningful surface ponding', legendColor: '#94a3b8' };
 }
 
 const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
@@ -82,7 +102,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
     origin: RoutePickPoint | null;
     destination: RoutePickPoint | null;
   }>({ origin: null, destination: null });
-  const [routeResult, setRouteResult] = useState<SafeRouteResponse | null>(null);
+  const [routeResult, setRouteResult] = useState<DelhiRouteResult | null>(null);
   const [routeHudOpen, setRouteHudOpen] = useState(false);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -103,7 +123,10 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
   // plus an increasing/decreasing indicator).
   const [replayStreets, setReplayStreets] = useState<StreetsIntel | null>(null);
   const [scenarioRoadDepths, setScenarioRoadDepths] = useState<
-    Record<string, { depth_cm: number; depth_m: number; flood_state: string }> | null
+    Record<
+      string,
+      { depth_cm: number | null; depth_m: number | null; water_depth_state: string }
+    > | null
   >(null);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [mobileDrawerExpanded, setMobileDrawerExpanded] = useState<boolean>(true);
@@ -189,61 +212,91 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
     setRouteError(null);
     setRouteLoading(false);
     const hasPicks = routePicks.origin !== null && routePicks.destination !== null;
-    if (next === 'LIVE' || next === 'REPLAY') {
-      if (hasPicks) {
-        setRouteHudOpen(true);
-        // REPLAY recomputation is driven by the replay-context effect below.
-        if (next === 'LIVE') {
-          void fetchSafeRoute(routePicks.origin!.coords, routePicks.destination!.coords, {
-            mode: 'live',
-          });
-        }
+    if (hasPicks) {
+      setRouteHudOpen(true);
+      // REPLAY and SCENARIO recomputation is driven by the context effects
+      // below (they own the clock/intensity state), LIVE is fetched here.
+      if (next === 'LIVE') {
+        void fetchSafeRoute(routePicks.origin!.coords, routePicks.destination!.coords, {
+          mode: 'live',
+        });
       }
-    } else {
-      setRouteHudOpen(false);
     }
   };
+
+  // One monotonic request id: the replay clock and the scenario intensity can
+  // move faster than the backend answers, and a late response must never
+  // replace the route for the state currently displayed. The direct call from
+  // a pick and the context effect can also ask for the SAME state back to
+  // back — the backend builds heavy structures per request, so an identical
+  // request already in flight is never duplicated.
+  const routeRequestSeq = useRef(0);
+  const routeInflightKey = useRef<string | null>(null);
 
   const fetchSafeRoute = useCallback(
     async (
       origin: [number, number],
       destination: [number, number],
-      context?: { mode: 'live' | 'historical'; replay?: { eventId: string; timestepIndex: number } | null },
+      context?: RouteContext,
     ) => {
+      const key =
+        context?.mode === 'scenario'
+          ? `scenario:${context.rainfallMmH}`
+          : context?.mode === 'historical'
+            ? `historical:${context.replay.eventId}:${context.replay.timestepIndex}`
+            : `live:${horizon}`;
+      if (key === routeInflightKey.current) return;
+      const seq = ++routeRequestSeq.current;
+      routeInflightKey.current = key;
       setRouteLoading(true);
       setRouteError(null);
       try {
-        const res =
-          context?.mode === 'historical' && context.replay
-            ? await delhiApi.getSafeRoute({
+        const res: DelhiRouteResult =
+          context?.mode === 'scenario'
+            ? await delhiApi.getScenarioSafeRoute({
                 origin,
                 destination,
-                mode: 'historical',
-                event_id: context.replay.eventId,
-                timestep_index: context.replay.timestepIndex,
+                rainfall_mm_h: context.rainfallMmH,
               })
-            : await delhiApi.getSafeRoute({
-                origin,
-                destination,
-                mode: 'live',
-                departure_hour: Math.max(0, HORIZONS.indexOf(horizon)),
-              });
+            : context?.mode === 'historical'
+              ? await delhiApi.getSafeRoute({
+                  origin,
+                  destination,
+                  mode: 'historical',
+                  event_id: context.replay.eventId,
+                  timestep_index: context.replay.timestepIndex,
+                })
+              : await delhiApi.getSafeRoute({
+                  origin,
+                  destination,
+                  mode: 'live',
+                  departure_hour: Math.max(0, HORIZONS.indexOf(horizon)),
+                });
+        if (seq !== routeRequestSeq.current) return;
         setRouteResult(res);
       } catch (err) {
+        if (seq !== routeRequestSeq.current) return;
         const msg = err instanceof Error ? err.message : 'Route calculation failed';
         setRouteError(msg);
         setRouteResult(null);
       } finally {
-        setRouteLoading(false);
+        if (seq === routeRequestSeq.current) {
+          setRouteLoading(false);
+          routeInflightKey.current = null;
+        }
       }
     },
     [horizon],
   );
 
   const routeContext = useCallback(
-    (): { mode: 'live' | 'historical'; replay?: { eventId: string; timestepIndex: number } | null } =>
-      mode === 'REPLAY' ? { mode: 'historical', replay: replayContext } : { mode: 'live' },
-    [mode, replayContext],
+    (): RouteContext =>
+      mode === 'SCENARIO'
+        ? { mode: 'scenario', rainfallMmH: scenarioMm }
+        : mode === 'REPLAY'
+          ? { mode: 'historical', replay: replayContext }
+          : { mode: 'live' },
+    [mode, replayContext, scenarioMm],
   );
 
   // ReplayControls reports its (event, timestep); identity-stable so the
@@ -276,6 +329,26 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
       replay: replayContext,
     });
   }, [mode, replayContext, routeResult, routePicks, fetchSafeRoute]);
+
+  // Same V1 pattern for the scenario clock: changing the WHAT-IF intensity
+  // re-evaluates an active route against the new modelled street depths, so
+  // the drawn route always belongs to the intensity shown in the header.
+  // Guarded by the route's own intensity, so a completed fetch never
+  // re-triggers itself.
+  useEffect(() => {
+    if (mode !== 'SCENARIO') return;
+    if (!routePicks.origin || !routePicks.destination) return;
+    if (
+      routeResult &&
+      routeResult.mode === 'SCENARIO' &&
+      routeResult.scenario.rainfall_mm_h === scenarioMm
+    )
+      return;
+    void fetchSafeRoute(routePicks.origin.coords, routePicks.destination.coords, {
+      mode: 'scenario',
+      rainfallMmH: scenarioMm,
+    });
+  }, [mode, scenarioMm, routeResult, routePicks, fetchSafeRoute]);
 
   const handleExitRouting = useCallback(() => {
     setRouteHudOpen(false);
@@ -336,7 +409,6 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
         : 'Documented event forcing';
 
   const syntheticFallback = liveState?.rainfall_status === 'SYNTHETIC_FALLBACK';
-  const routeRoutingActive = (mode === 'LIVE' || mode === 'REPLAY') && routeHudOpen;
 
   return (
     <div className="flood-app">
@@ -458,9 +530,9 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
       <div className="map-workspace">
         <DelhiMap
           flowState={mapFlow}
-          routeResult={mode === 'LIVE' || mode === 'REPLAY' ? routeResult : null}
+          routeResult={routeResult}
           routePicks={routePicks}
-          pickTarget={mode === 'LIVE' || mode === 'REPLAY' ? routePick : null}
+          pickTarget={routePick}
           onMapClick={handleMapClick}
           drainageGraph={drainageGraph}
           surfaceHotspots={surfaceHotspots}
@@ -503,8 +575,8 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
             <div className="drawer-pill-handle" />
             <div className="drawer-title-row">
               <span className="drawer-summary-text">
-                <span className="drawer-risk-dot" style={{ backgroundColor: banner.border || '#0284c7' }} />
-                {banner.text} • {maxDepthM !== null ? `${maxDepthM.toFixed(2)}m` : '0.00m'} Peak
+                <span className="drawer-risk-dot" style={{ backgroundColor: banner.legendColor }} />
+                {banner.text} • {maxDepthM !== null ? `${(maxDepthM * 100).toFixed(0)} cm` : 'no value'} peak
               </span>
               <span className="drawer-toggle-btn">
                 {mobileDrawerExpanded ? 'Collapse ▾' : 'Insights ▴'}
@@ -666,11 +738,12 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
               </button>
               <button
                 type="button"
-                className={`extent-btn routing-btn ${routeRoutingActive ? 'active' : ''}`}
+                className={`extent-btn routing-btn ${routeHudOpen ? 'active' : ''}`}
                 onClick={() => {
-                  // V1 behaviour: routing works in LIVE and REPLAY without
-                  // leaving the current workflow.
-                  if (mode !== 'LIVE' && mode !== 'REPLAY') return;
+                  // V1 behaviour: routing works in every workflow without
+                  // leaving it — the mode only decides which hazard state
+                  // the route is evaluated against (nowcast horizon,
+                  // replayed timestep, or scenario intensity).
                   setRouteHudOpen((open) => {
                     const next = !open;
                     if (next) {
@@ -688,7 +761,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
                 }}
                 title="Toggle Flood-Safe Route Finder (click map origin & destination)"
               >
-                SAFE ROUTE {routeRoutingActive ? '●' : ''}
+                SAFE ROUTE {routeHudOpen ? '●' : ''}
               </button>
             </div>
 
@@ -697,7 +770,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
               <div className="flood-status-panel">
                 <div className="status-panel-top">
                   <div className="status-horizon-kicker text-xs font-medium uppercase tracking-widest text-gray-500">
-                    {mode === 'LIVE' ? 'PREDICTED CONDITIONS' : 'SCENARIO RISK'}
+                    {mode === 'LIVE' ? 'PREDICTED CONDITIONS' : 'SCENARIO CONDITIONS'}
                   </div>
                   <div className="status-horizon-title text-xl font-bold tracking-tight">
                     {mode === 'LIVE'
@@ -711,7 +784,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
                 >
                   <div className="hero-risk-header">
                     <span className="hero-risk-kicker" style={{ color: banner.color }}>
-                      {mode === 'LIVE' ? 'PREDICTED RISK' : 'SCENARIO RISK'}
+                      {mode === 'LIVE' ? 'PREDICTED DEPTH BAND' : 'SCENARIO DEPTH BAND'}
                     </span>
                     <span className="hero-risk-badge" style={{ background: banner.color, color: '#fff' }}>
                       {banner.text}
@@ -720,14 +793,16 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
                   <div className="hero-depth-row">
                     <div className="depth-digit-group">
                       <span className="depth-large" style={{ color: banner.color }}>
-                        {maxDepthM === null ? '--' : maxDepthM.toFixed(2)}
+                        {maxDepthM === null ? '--' : (maxDepthM * 100).toFixed(0)}
                       </span>
-                      <span className="depth-metric-unit">m</span>
+                      {maxDepthM !== null && (
+                        <span className="depth-metric-unit">cm</span>
+                      )}
                     </div>
                     <div className="depth-context-label">
-                      <div className="context-primary">Peak Inundation</div>
+                      <div className="context-primary">Peak modelled depth</div>
                       <div className="context-secondary">
-                        {maxDepthM === null ? 'depth unknown' : `${Math.round(maxDepthM * 100)} cm depth`}
+                        {maxDepthM === null ? '30 m grid • no value' : 'deepest 30 m grid cell'}
                       </div>
                     </div>
                   </div>
@@ -794,7 +869,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
                   setPickTarget={setRoutePick}
                   picks={routePicks}
                   setPicks={setRoutePicks}
-                  routeResult={routeResult}
+                  routeResult={routeResult?.mode === 'SCENARIO' ? null : routeResult}
                   setRouteResult={setRouteResult}
                 />
               </>
@@ -828,8 +903,8 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
           </div>
         </div>
 
-        {/* SAFE-ROUTE HUD (V1 floating panel; LIVE + REPLAY modes) */}
-        {routeRoutingActive && (
+        {/* SAFE-ROUTE HUD (V1 floating panel; all three workflows) */}
+        {routeHudOpen && (
           <SafeRouteHud
             picks={routePicks}
             routeResult={routeResult}
@@ -856,7 +931,7 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
         )}
         {/* FLOOD DEPTH LEGEND (V1, always visible) */}
         <div className="flood-legend-card">
-          <div className="legend-heading">Modelled flood depth</div>
+          <div className="legend-heading">Modelled flood depth (cm)</div>
           <div className="legend-scale">
             {DEPTH_LEGEND.map((g) => (
               <div className="legend-grade" key={g.range}>
@@ -865,6 +940,11 @@ const DelhiApp = ({ theme }: { theme?: MapTheme } = {}) => {
                 <span className="grade-desc">{g.desc}</span>
               </div>
             ))}
+          </div>
+          <div className="legend-note">
+            Depth bands of the V1 model output, in centimetres — the same
+            thresholds the map uses.
+            Classification bands, not hazard standards or a safety claim.
           </div>
         </div>
 
@@ -934,13 +1014,13 @@ const StreetIntelCard = ({
             </div>
             <div className="impact-depth-badge">
               <span className="depth-lbl">Peak Street Depth</span>
-              <span className="depth-val">{s.max_street_depth_m.toFixed(2)} m</span>
+              <span className="depth-val">{(s.max_street_depth_m * 100).toFixed(0)} cm</span>
             </div>
           </div>
           <div className="street-risk-pills">
             {s.risk_counts.CRITICAL > 0 && <span className="risk-pill critical">{s.risk_counts.CRITICAL} Critical</span>}
             {s.risk_counts.HIGH > 0 && <span className="risk-pill high">{s.risk_counts.HIGH} High</span>}
-            {s.risk_counts.MEDIUM > 0 && <span className="risk-pill medium">{s.risk_counts.MEDIUM} Moderate</span>}
+            {s.risk_counts.MEDIUM > 0 && <span className="risk-pill medium">{s.risk_counts.MEDIUM} Medium</span>}
             {s.risk_counts.LOW > 0 && <span className="risk-pill low">{s.risk_counts.LOW} Low</span>}
           </div>
           {trends && (trends.RISING + trends.FALLING + trends.EMERGING > 0 || trends.STEADY > 0) && (
@@ -965,7 +1045,7 @@ const StreetIntelCard = ({
                 </div>
                 <div className="street-item-right">
                   <span className={`street-risk-tag risk-${r.risk_level.toLowerCase()}`}>{r.risk_level}</span>
-                  <span className="street-depth-tag">{r.max_depth_m.toFixed(2)}m</span>
+                  <span className="street-depth-tag">{Math.round(r.max_depth_m * 100)} cm</span>
                   {r.depth_trend && (
                     <span
                       className="street-depth-tag"
@@ -998,7 +1078,7 @@ const StreetIntelCard = ({
       )}
       <div className="street-panel-provenance">
         OSM roads/junctions matched to the modelled depth grid • Not municipal road sensors • UNKNOWN
-        beyond the match distance, never 0 m
+        beyond the match distance, never 0 cm
         {trends &&
           ' • ▲/▼ depth change vs the previous replay timestep of the same model, not observed'}
       </div>
@@ -1022,7 +1102,7 @@ const SafeRouteHud = ({
   onRetry,
 }: {
   picks: { origin: RoutePickPoint | null; destination: RoutePickPoint | null };
-  routeResult: SafeRouteResponse | null;
+  routeResult: DelhiRouteResult | null;
   pickTarget: 'origin' | 'destination' | null;
   loading: boolean;
   error: string | null;
@@ -1150,7 +1230,11 @@ const SafeRouteHud = ({
               <span className={`m-val ${rec.flood_risk_summary.elevated_risk_segments > 0 ? 'highlight-danger' : ''}`}>
                 {rec.flood_risk_summary.elevated_risk_segments}
               </span>
-              <span className="m-sub">segments with modeled loading</span>
+              <span className="m-sub">
+                {routeResult?.mode === 'SCENARIO'
+                  ? 'segments at/above the modelled hazard depth'
+                  : 'segments with modeled loading'}
+              </span>
             </div>
             <div className="route-metric-card">
               <span className="m-label">UNKNOWN</span>
@@ -1167,8 +1251,15 @@ const SafeRouteHud = ({
             <div className="route-comparison-note">{routeResult.explanation[0]}</div>
           ) : null}
           <div className="route-unavailable-warning">
-            LOW MODELED EXPOSURE ≠ SAFE: stage/depth remain UNKNOWN on the Kushak corridor. See the route
-            panel for the full evidence trail.
+            {routeResult && routeResult.mode === 'SCENARIO' ? (
+              <>
+                WHAT-IF {routeResult.scenario.rainfall_mm_h} mm/h • peak modelled depth on this
+                route {Math.round(routeResult.max_depth_on_route_m * 100)} cm. Lowest exposure under a
+                hypothetical input — NOT live weather, NOT a guarantee of safety.
+              </>
+            ) : (
+              'LOW MODELED EXPOSURE ≠ SAFE: stage/depth remain UNKNOWN on the Kushak corridor. See the route panel for the full evidence trail.'
+            )}
           </div>
         </>
       )}

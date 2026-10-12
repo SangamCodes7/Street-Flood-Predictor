@@ -1111,6 +1111,9 @@
   box-shadow: var(--panel-shadow);
   padding: 10px 14px;
   min-width: 170px;
+  /* Without a cap the shrink-to-fit card sizes itself to the longest line of
+     .legend-note and spans most of the map. */
+  max-width: 214px;
 }
 
 .legend-heading {
@@ -1156,6 +1159,15 @@
   font-size: 11px;
   color: var(--text-muted);
   margin-left: auto;
+}
+
+.legend-note {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #e2e8f0;
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
 }
 
 /* 8. BANNERS (Loading & Error) */

@@ -189,6 +189,7 @@ interface ShortestPathComparisonAPI {
   max_flood_depth_m: number;
   has_flooded_roads: boolean;
   flooded_road_count: number;
+  geometry?: any | null;
 }
 
 interface SafeRouteAPIResponse {
@@ -201,6 +202,7 @@ interface SafeRouteAPIResponse {
   shortest_path_comparison?: ShortestPathComparisonAPI | null;
   start_snapped_to?: SnappedPointAPI | null;
   end_snapped_to?: SnappedPointAPI | null;
+  provenance?: Record<string, string> | null;
 }
 
 interface HorizonData {
@@ -230,54 +232,122 @@ interface RiskInfo {
   textCol: string;
   depthCol: string;
   description: string;
+  legendColor: string;
 }
 
-function getRiskCategory(maxDepthM: number): RiskInfo {
-  if (maxDepthM > 1.0) {
+// Depth-band labels of the 30 m modelled grid, in centimetres. Index is the
+// backend depth_class_id from replay.py; the boundaries are the same ones its
+// DEPTH_CLASS_LABELS describe in metres.
+const DEPTH_BANDS_CM = ['0 – 50 cm', '50 – 100 cm', '100 – 200 cm', '200+ cm'];
+
+// Source-cited depth texts (e.g. "0.60–1.10 m", ">2.20 m") reach the client in
+// metres. The UI shows one depth unit, so a plain range is rewritten in cm;
+// anything that is not exactly a metre range is passed through unchanged rather
+// than guessed at.
+function depthTextInCm(text: string | undefined | null): string | undefined {
+  if (!text) return undefined;
+  const match = text.trim().match(/^(>|≥)?\s*([\d.]+)(?:\s*[–-]\s*([\d.]+))?\s*m$/);
+  if (!match) return text;
+  const toCm = (v: string) => String(Math.round(parseFloat(v) * 100));
+  const prefix = match[1] ?? '';
+  return match[3]
+    ? `${prefix}${toCm(match[2])} – ${toCm(match[3])} cm`
+    : `${prefix}${toCm(match[2])} cm`;
+}
+
+// The benchmark provenance sentence written by replay.py quotes depths in
+// metres. Only the depth figures and the cited depth range are rewritten here:
+// the buffer, cell and nearest-flooded-cell figures in the same sentence are
+// lengths and stay in metres.
+function notesDepthsInCm(text: string): string {
+  return text
+    .replace(/depth: (\d*\.?\d+)m\b/g, (_all, v) => `depth: ${(parseFloat(v) * 100).toFixed(1)} cm`)
+    .replace(/Observed descriptor: (.+?)\.\s*$/, (_all, d) => `Observed range: ${depthTextInCm(d) ?? d}.`);
+}
+
+// Peak-depth classification. The boundaries, names and colours here are the
+// SAME bands the depth legend and the backend polygon classifier use
+// (backend/app/domain/historical/replay.py DEPTH_CLASS_LABELS: 0.5/1.0/2.0 m,
+// shown on screen in centimetres — 50/100/200 cm are the same boundaries),
+// so one depth can never be labelled two different ways on screen.
+// These are modelled-depth bands on the 30 m grid, not road-passability tiers
+// and not a safety guarantee.
+function getRiskCategory(maxDepthM: number | null | undefined): RiskInfo {
+  if (maxDepthM === null || maxDepthM === undefined || Number.isNaN(maxDepthM)) {
+    return {
+      text: 'UNKNOWN',
+      level: 'Depth band unavailable',
+      badgeClass: 'risk-low',
+      bannerBg: '#f8fafc',
+      bannerBorder: '#cbd5e1',
+      textCol: '#475569',
+      depthCol: '#475569',
+      description: 'No modelled depth for this step — nothing is being asserted',
+      legendColor: '#94a3b8'
+    };
+  }
+  if (maxDepthM >= 2.0) {
     return {
       text: 'SEVERE',
-      level: 'Severe Inundation Risk',
+      level: '200+ cm depth band',
       badgeClass: 'risk-severe',
-      bannerBg: '#fef2f2',
+      bannerBg: '#fee2e2',
       bannerBorder: '#f87171',
       textCol: '#991b1b',
       depthCol: '#991b1b',
-      description: 'Major inundation • Significant roadway disruption'
+      description: '200+ cm band • deepest modelled ponding on the 30 m grid',
+      legendColor: '#bd0026'
+    };
+  }
+  if (maxDepthM >= 1.0) {
+    return {
+      text: 'HIGH',
+      level: '100 – 200 cm depth band',
+      badgeClass: 'risk-high',
+      bannerBg: '#fef2f2',
+      bannerBorder: '#f87171',
+      textCol: '#b91c1c',
+      depthCol: '#b91c1c',
+      description: '100 – 200 cm band • deep ponding in the lowest modelled cells',
+      legendColor: '#f03b20'
     };
   }
   if (maxDepthM >= 0.5) {
     return {
-      text: 'HIGH',
-      level: 'High Inundation Risk',
-      badgeClass: 'risk-high',
+      text: 'MODERATE',
+      level: '50 – 100 cm depth band',
+      badgeClass: 'risk-mod',
       bannerBg: '#fff7ed',
       bannerBorder: '#fb923c',
       textCol: '#c2410c',
       depthCol: '#c2410c',
-      description: 'Curb overflow • Street flooding in low-lying areas'
+      description: '50 – 100 cm band • widespread surface water in low-lying cells',
+      legendColor: '#feb24c'
     };
   }
   if (maxDepthM > 0.0) {
     return {
-      text: 'MODERATE',
-      level: 'Moderate Inundation Risk',
-      badgeClass: 'risk-mod',
+      text: 'MINOR',
+      level: '0 – 50 cm depth band',
+      badgeClass: 'risk-low',
       bannerBg: '#fefce8',
       bannerBorder: '#facc15',
       textCol: '#854d0e',
       depthCol: '#854d0e',
-      description: 'Localized waterlogging in terrain depressions'
+      description: '0 – 50 cm band • shallow ponding in terrain depressions',
+      legendColor: '#ffeda0'
     };
   }
   return {
     text: 'NO INUNDATION',
-    level: 'No Inundation',
+    level: 'No flooded cell',
     badgeClass: 'risk-low',
     bannerBg: '#f8fafc',
     bannerBorder: '#cbd5e1',
     textCol: '#166534',
     depthCol: '#166534',
-    description: 'Runoff safely conveyed by drainage • No surface ponding'
+    description: 'Modelled runoff leaves no surface ponding in the grid',
+    legendColor: '#94a3b8'
   };
 }
 
@@ -328,6 +398,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
   routeResponseRef.current = routeResponse;
   const [routeLoading, setRouteLoading] = useState<boolean>(false);
   const [routeError, setRouteError] = useState<string | null>(null);
+  const routeRequestSeq = useRef<number>(0);
   const [mobileDrawerExpanded, setMobileDrawerExpanded] = useState<boolean>(true);
   const initialThemeOnMount = useRef(theme);
 
@@ -468,6 +539,20 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       }
     }
 
+    // Update the unconstrained shortest path (drawn for comparison, dashed grey)
+    const shortestSource = map.getSource('shortest-route') as GeoJSONSource | undefined;
+    if (shortestSource) {
+      const geom = route?.shortest_path_comparison?.geometry;
+      if (geom && Array.isArray(geom.coordinates) && geom.coordinates.length > 1) {
+        shortestSource.setData({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', properties: {}, geometry: geom }],
+        });
+      } else {
+        shortestSource.setData({ type: 'FeatureCollection', features: [] });
+      }
+    }
+
     // Update origin/destination pins
     const wpSource = map.getSource('route-waypoints') as GeoJSONSource | undefined;
     if (wpSource) {
@@ -499,6 +584,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
     modeOverride?: AppMode,
     scenarioOverride?: ScenarioValue
   ) => {
+    const seq = ++routeRequestSeq.current;
     setRouteLoading(true);
     setRouteError(null);
     try {
@@ -510,8 +596,17 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       if (mode === 'SCENARIO') {
         url += `&rainfall_scenario_mm=${sc}`;
       }
+      if (mode === 'HISTORICAL') {
+        // Route against the exact replay timestep shown on the map, not the live forecast
+        const eventId = historicalDataRef.current?.event_id;
+        if (!eventId) {
+          throw new Error('Historical replay is still loading — choose a start and end point after the replay appears.');
+        }
+        url += `&event=${encodeURIComponent(eventId)}&step=${historicalStepRef.current}`;
+      }
 
       const res = await fetch(apiUrl(url));
+      if (seq !== routeRequestSeq.current) return;
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
         const msg = errJson?.detail || `Routing error (${res.status})`;
@@ -521,12 +616,13 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       setRouteResponse(data);
       updateRouteOnMap(data, start, end);
     } catch (err: any) {
+      if (seq !== routeRequestSeq.current) return;
       console.error('Failed to calculate safe route:', err);
       setRouteError(err?.message || 'Failed to calculate safe route');
       setRouteResponse(null);
       updateRouteOnMap(null, start, end);
     } finally {
-      setRouteLoading(false);
+      if (seq === routeRequestSeq.current) setRouteLoading(false);
     }
   }, [updateRouteOnMap]);
 
@@ -775,11 +871,12 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
         type: 'fill',
         source: 'flood-depth',
         paint: {
+          // Discrete bands, not a gradient: a cell is painted exactly the
+          // colour the legend and the risk badge claim for its depth band.
           'fill-color': [
-            'interpolate',
-            ['linear'],
+            'step',
             ['get', 'depth'],
-            0, '#ffeda0',
+            '#ffeda0',
             0.5, '#feb24c',
             1.0, '#f03b20',
             2.0, '#bd0026'
@@ -946,6 +1043,32 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
     }
 
     // 7. SAFE ROUTING SOURCES & LAYERS
+    if (!map.getSource('shortest-route')) {
+      map.addSource('shortest-route', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+    }
+
+    if (!map.getLayer('shortest-route-line')) {
+      map.addLayer({
+        id: 'shortest-route-line',
+        type: 'line',
+        source: 'shortest-route',
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          'visibility': 'visible',
+        },
+        paint: {
+          'line-color': '#94a3b8',
+          'line-width': 3,
+          'line-dasharray': [1.8, 1.4],
+          'line-opacity': 0.9,
+        }
+      });
+    }
+
     if (!map.getSource('safe-route')) {
       map.addSource('safe-route', {
         type: 'geojson',
@@ -1037,17 +1160,24 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       if (!e.features || e.features.length === 0) return;
       const props = e.features[0].properties || {};
       const name = props.location_name || 'Benchmark Location';
-      const minObs = props.observed_min_depth_m != null ? Number(props.observed_min_depth_m).toFixed(2) : '--';
-      const maxObs = props.observed_max_depth_m != null ? Number(props.observed_max_depth_m).toFixed(2) : null;
-      const obsRangeStr = props.observed_depth_range || props.descriptor || (maxObs ? `${minObs} – ${maxObs} m` : `>2.20 m`);
-      const matchedDepth = props.matched_depth_m != null ? Number(props.matched_depth_m).toFixed(3) : '0.000';
+      // Observed ranges reach the client as canonical source text in metres.
+      // When the numeric bounds are on the feature they are re-rendered in cm,
+      // so no depth on this screen is shown in two different units at once.
+      const obsMin = props.observed_min_depth_m != null ? Number(props.observed_min_depth_m) : null;
+      const obsMax = props.observed_max_depth_m != null ? Number(props.observed_max_depth_m) : null;
+      const obsRangeStr = obsMin !== null && obsMax !== null
+        ? `${Math.round(obsMin * 100)} – ${Math.round(obsMax * 100)} cm`
+        : (depthTextInCm(props.observed_depth_range || props.descriptor) || '>220 cm');
+      const matchedDepthM = props.matched_depth_m != null ? Number(props.matched_depth_m) : null;
+      const isDryCell = matchedDepthM === null || matchedDepthM === 0;
+      const matchedDepthCm = matchedDepthM === null ? '0.0' : (matchedDepthM * 100).toFixed(1);
       const inRange = Boolean(props.within_observed_range);
       const spatialStatus = props.spatial_status === 'OUTSIDE_PILOT_EXTENT'
         ? 'Outside Pilot'
-        : (matchedDepth === '0.000' ? 'Dry Cell' : (inRange ? 'In Range' : 'Outside Range'));
+        : (isDryCell ? 'Dry Cell' : (inRange ? 'In Range' : 'Outside Range'));
       const matchMethod = props.match_method || 'Point comparison';
       const distanceM = props.matched_cell_distance_m != null ? `${Number(props.matched_cell_distance_m).toFixed(1)} m` : 'N/A';
-      const notes = props.notes || '';
+      const notes = notesDepthsInCm(props.notes || '');
 
       if (popupRef.current) popupRef.current.remove();
       popupRef.current = new Popup({ closeButton: true, closeOnClick: true, className: 'ops-popup' })
@@ -1069,7 +1199,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
               </div>
               <div class="popup-row">
                 <span class="lbl">Modeled Depth:</span>
-                <span class="val bold" style="color: #0369a1">${matchedDepth} m</span>
+                <span class="val bold" style="color: #0369a1">${matchedDepthCm} cm</span>
               </div>
               <div class="popup-row">
                 <span class="lbl">Match Method:</span>
@@ -1109,8 +1239,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       if (isRoutingActiveRef.current) return;
       if (!e.features || e.features.length === 0) return;
       const props = e.features[0].properties || {};
-      const depthM = props.max_depth_m != null ? Number(props.max_depth_m).toFixed(2) : '0.00';
-      const depthCm = Math.round(Number(depthM) * 100);
+      const depthCm = props.max_depth_m != null ? Math.round(Number(props.max_depth_m) * 100) : 0;
       const risk = props.risk_level || 'LOW';
       const name = props.name || 'Unnamed Street';
       const len = props.flooded_length_m ? `${props.flooded_length_m} m` : 'N/A';
@@ -1140,7 +1269,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
               </div>
               <div class="popup-row">
                 <span class="lbl">${depthLbl}</span>
-                <span class="val bold" style="color: #c2410c">${depthM} m (${depthCm} cm)</span>
+                <span class="val bold" style="color: #c2410c">${depthCm} cm</span>
               </div>
               <div class="popup-row">
                 <span class="lbl">Flooded corridor:</span>
@@ -1177,8 +1306,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       if (isRoutingActiveRef.current) return;
       if (!e.features || e.features.length === 0) return;
       const props = e.features[0].properties || {};
-      const depthM = props.max_depth_m != null ? Number(props.max_depth_m).toFixed(2) : '0.00';
-      const depthCm = Math.round(Number(depthM) * 100);
+      const depthCm = props.max_depth_m != null ? Math.round(Number(props.max_depth_m) * 100) : 0;
       const risk = props.risk_level || 'LOW';
       const name = props.name || 'Junction';
       const roads = props.roads_display || name;
@@ -1207,7 +1335,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
               </div>
               <div class="popup-row">
                 <span class="lbl">${depthLbl}</span>
-                <span class="val bold" style="color: #c2410c">${depthM} m (${depthCm} cm)</span>
+                <span class="val bold" style="color: #c2410c">${depthCm} cm</span>
               </div>
               <div class="popup-row">
                 <span class="lbl">Topology:</span>
@@ -1245,9 +1373,14 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       const minDepth = feature.properties?.min_depth != null ? Number(feature.properties.min_depth) : depth;
       const maxDepth = feature.properties?.max_depth != null ? Number(feature.properties.max_depth) : depth;
       const meanDepth = feature.properties?.mean_depth != null ? Number(feature.properties.mean_depth) : depth;
-      const depthBand = feature.properties?.depth_class as string | undefined;
+      const depthBand = (() => {
+        // The replay polygons label bands in metres (backend DEPTH_CLASS_LABELS).
+        // The class id maps to the identical boundary, shown here in cm.
+        const id = feature.properties?.depth_class_id;
+        const cmBand = typeof id === 'number' ? DEPTH_BANDS_CM[id] : undefined;
+        return cmBand ?? (feature.properties?.depth_class as string | undefined);
+      })();
 
-      const depthM = depth.toFixed(2);
       const depthCm = Math.round(depth * 100);
       const risk = getRiskCategory(depth);
 
@@ -1267,7 +1400,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
       const depthDisplayRow = (isHistorical && cellCount > 1)
         ? `<div class="popup-row">
              <span class="lbl">Depth range:</span>
-             <span class="val bold">${minDepth.toFixed(2)} – ${maxDepth.toFixed(2)} m (mean: ${meanDepth.toFixed(2)} m)</span>
+             <span class="val bold">${Math.round(minDepth * 100)} – ${Math.round(maxDepth * 100)} cm (mean: ${Math.round(meanDepth * 100)} cm)</span>
            </div>
            <div class="popup-row">
              <span class="lbl">Depth band:</span>
@@ -1278,9 +1411,13 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
              <span class="val">${cellCount} cells (~${(cellCount * 900).toLocaleString()} m²)</span>
            </div>`
         : `<div class="popup-row">
-             <span class="lbl">Predicted depth:</span>
-             <span class="val bold">${depthM} m (${depthCm} cm)</span>
-           </div>`;
+             <span class="lbl">${isHistorical ? 'Simulated depth:' : 'Predicted depth:'}</span>
+             <span class="val bold">${depthCm} cm</span>
+           </div>
+           ${depthBand ? `<div class="popup-row">
+             <span class="lbl">Depth band:</span>
+             <span class="val">${depthBand}</span>
+           </div>` : ''}`;
 
       const horizonOrScenarioRow = isHistorical
         ? `<div class="popup-row">
@@ -1558,6 +1695,14 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
     return () => clearInterval(intervalId);
   }, [isPlaying, appMode, applyHistoricalStepToMap]);
 
+  // Re-route when the hazard the map is showing changes (mode switch or replay timestep)
+  useEffect(() => {
+    if (appMode !== 'HISTORICAL') return;
+    if (!routeOriginRef.current || !routeDestinationRef.current) return;
+    if (!historicalData) return;
+    fetchSafeRoute(routeOriginRef.current, routeDestinationRef.current);
+  }, [appMode, historicalStep, historicalData, fetchSafeRoute]);
+
   // Handle horizon change
   const handleHorizonChange = (h: ForecastHorizon) => {
     if (popupRef.current) {
@@ -1589,6 +1734,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
         hData = await fetchHistoricalReplay();
       }
       if (hData) {
+        historicalDataRef.current = hData;
         applyHistoricalStepToMap(historicalStepRef.current, hData);
       }
       if (mapInstanceRef.current) {
@@ -1712,16 +1858,19 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
   const scenarioState = scenarioData?.[activeScenario];
   const histStepState = historicalData?.timesteps?.[historicalStep];
 
+  // Values come from the API state only. When a state has not loaded (or the
+  // model refused to compute it) the depth stays null and the hero card says
+  // UNKNOWN — hardcoded placeholder depths are never displayed as output.
   const maxDepthM = isHistoricalMode
-    ? (histStepState?.peak_flood_depth_m ?? 0)
+    ? (histStepState?.peak_flood_depth_m ?? null)
     : isScenarioMode
-    ? (scenarioState?.max_depth_m ?? (activeScenario === 20 ? 0 : activeScenario === 40 ? 0.14 : activeScenario === 50 ? 0.29 : 0.58))
-    : (liveState?.max_depth_m ?? 0);
+    ? (scenarioState?.max_depth_m ?? null)
+    : (liveState?.max_depth_m ?? null);
 
   const floodedAreaM2 = isHistoricalMode
     ? (histStepState?.flooded_area_m2 ?? 0)
     : isScenarioMode
-    ? (scenarioState?.flooded_area_m2 ?? (activeScenario === 20 ? 0 : 45900))
+    ? (scenarioState?.flooded_area_m2 ?? 0)
     : (liveState?.flooded_area_m2 ?? 0);
 
   const riskInfo = getRiskCategory(maxDepthM);
@@ -1889,8 +2038,8 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
             <div className="drawer-pill-handle" />
             <div className="drawer-title-row">
               <span className="drawer-summary-text">
-                <span className="drawer-risk-dot" style={{ backgroundColor: riskInfo.bannerBorder || '#0284c7' }} />
-                {riskInfo.text} • {Number(maxDepthM).toFixed(2)}m Peak
+                <span className="drawer-risk-dot" style={{ backgroundColor: riskInfo.legendColor }} />
+                {riskInfo.text} • {maxDepthM === null ? '--' : `${(maxDepthM * 100).toFixed(0)} cm`} peak
               </span>
               <span className="drawer-toggle-btn">
                 {mobileDrawerExpanded ? 'Collapse ▾' : 'Insights ▴'}
@@ -2053,7 +2202,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                   <div className="hist-forcing-box">
                     <span className="h-lbl">Tide:</span>
                     <span className="h-val">
-                      {(histStepState?.boundary_level_m ?? 0).toFixed(2)} m
+                      {((histStepState?.boundary_level_m ?? 0) * 100).toFixed(0)} cm
                     </span>
                   </div>
                 </div>
@@ -2188,7 +2337,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
             >
               <div className="hero-risk-header">
                 <span className="hero-risk-kicker" style={{ color: riskInfo.textCol }}>
-                  {isHistoricalMode ? 'SIMULATED RISK' : isScenarioMode ? 'SCENARIO RISK' : 'PREDICTED RISK'}
+                  {isHistoricalMode ? 'SIMULATED DEPTH BAND' : isScenarioMode ? 'SCENARIO DEPTH BAND' : 'PREDICTED DEPTH BAND'}
                 </span>
                 <span className={`hero-risk-badge ${riskInfo.badgeClass}`}>
                   {riskInfo.text}
@@ -2197,13 +2346,17 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
               <div className="hero-depth-row">
                 <div className="depth-digit-group">
                   <span className="depth-large" style={{ color: riskInfo.depthCol }}>
-                    {Number(maxDepthM).toFixed(2)}
+                    {maxDepthM === null ? '--' : (maxDepthM * 100).toFixed(0)}
                   </span>
-                  <span className="depth-metric-unit">m</span>
+                  {maxDepthM !== null && (
+                    <span className="depth-metric-unit">cm</span>
+                  )}
                 </div>
                 <div className="depth-context-label">
-                  <div className="context-primary">Peak Inundation</div>
-                  <div className="context-secondary">{Math.round(maxDepthM * 100)} cm depth</div>
+                  <div className="context-primary">Peak modelled depth</div>
+                  <div className="context-secondary">
+                    {maxDepthM === null ? '30 m grid • no value' : 'deepest 30 m grid cell'}
+                  </div>
                 </div>
               </div>
               <div className="hero-impact-note" style={{ color: riskInfo.textCol }}>
@@ -2257,8 +2410,8 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
               </div>
               <div className="event-summary-grid grid grid-cols-2 gap-4">
                 <div className="event-stat-box">
-                  <span className="stat-label block text-xs font-medium text-gray-500 mb-1">Peak Modeled Depth</span>
-                  <span className="stat-val highlight block text-lg font-bold text-gray-900 tracking-tight">{historicalData.event_summary.peak_depth.value.toFixed(3)} m</span>
+                  <span className="stat-label block text-xs font-medium text-gray-500 mb-1">Peak Modeled Depth (cm)</span>
+                  <span className="stat-val highlight block text-lg font-bold text-gray-900 tracking-tight">{(historicalData.event_summary.peak_depth.value * 100).toFixed(1)} cm</span>
                   <span className="stat-sub block text-xs text-gray-400">{historicalData.event_summary.peak_depth.time_display}</span>
                 </div>
                 <div className="event-stat-box">
@@ -2305,17 +2458,19 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                   <thead>
                     <tr>
                       <th>Location</th>
-                      <th>Observed</th>
-                      <th>Modeled</th>
+                      <th>Observed (cm)</th>
+                      <th>Modeled (cm)</th>
                       <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {historicalData.validation_comparisons.map((comp) => {
-                      const obsStr = comp.observed_depth_range || (comp.observed_max_depth_m
-                        ? `${comp.observed_min_depth_m.toFixed(2)}–${comp.observed_max_depth_m.toFixed(2)} m`
-                        : `>2.20 m`);
-                      const modStr = comp.matched_depth_m != null ? `${comp.matched_depth_m.toFixed(3)} m` : 'None';
+                      // Source descriptors are metres; numeric bounds are shown
+                      // in cm so this table uses one depth unit.
+                      const obsStr = comp.observed_max_depth_m != null
+                        ? `${Math.round(comp.observed_min_depth_m * 100)}–${Math.round(comp.observed_max_depth_m * 100)} cm`
+                        : (depthTextInCm(comp.observed_depth_range) || '>220 cm');
+                      const modStr = comp.matched_depth_m != null ? `${(comp.matched_depth_m * 100).toFixed(1)} cm` : 'None';
                       const statusInfo = (() => {
                         if (comp.spatial_status === 'OUTSIDE_PILOT_EXTENT') {
                           return { text: 'Outside Pilot', css: 'status-outside-pilot-extent' };
@@ -2388,7 +2543,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                     </div>
                     <div className="impact-depth-badge">
                       <span className="depth-lbl">Peak Street Depth</span>
-                      <span className="depth-val">{currentStreetIntel.summary.max_street_depth_m.toFixed(2)} m</span>
+                      <span className="depth-val">{(currentStreetIntel.summary.max_street_depth_m * 100).toFixed(0)} cm</span>
                     </div>
                   </div>
 
@@ -2406,7 +2561,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                     )}
                     {currentStreetIntel.summary.risk_counts.MEDIUM > 0 && (
                       <span className="risk-pill medium">
-                        {currentStreetIntel.summary.risk_counts.MEDIUM} Moderate
+                        {currentStreetIntel.summary.risk_counts.MEDIUM} Medium
                       </span>
                     )}
                     {currentStreetIntel.summary.risk_counts.LOW > 0 && (
@@ -2436,7 +2591,7 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                           <span className={`street-risk-tag risk-${road.risk_level.toLowerCase()}`}>
                             {road.risk_level}
                           </span>
-                          <span className="street-depth-tag">{road.max_depth_m.toFixed(2)}m</span>
+                          <span className="street-depth-tag">{Math.round(road.max_depth_m * 100)} cm</span>
                         </div>
                       </div>
                     ))}
@@ -2659,10 +2814,10 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                   <div className="route-metric-card">
                     <span className="m-label">MAX FLOOD DEPTH</span>
                     <span className={`m-val ${routeResponse.max_predicted_flood_depth_m > 0 ? 'highlight-danger' : ''}`}>
-                      {routeResponse.max_predicted_flood_depth_m.toFixed(2)} <span className="m-unit">m</span>
+                      {Math.round(routeResponse.max_predicted_flood_depth_m * 100)} <span className="m-unit">cm</span>
                     </span>
                     <span className="m-sub">
-                      {Math.round(routeResponse.max_predicted_flood_depth_m * 100)} cm along path
+                      deepest street along path
                     </span>
                   </div>
                 </div>
@@ -2685,15 +2840,34 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
                 )}
 
                 {/* Shortest path traverse note */}
-                {routeResponse.shortest_path_comparison?.has_flooded_roads && (
+                {routeResponse.shortest_path_comparison?.has_flooded_roads && routeResponse.status !== 'UNAVAILABLE' && (
                   <div className="route-comparison-note">
-                    ⚠️ Direct shortest path has {routeResponse.shortest_path_comparison.flooded_road_count} flooded road segment(s) (up to {routeResponse.shortest_path_comparison.max_flood_depth_m.toFixed(2)}m deep). Safe route detours to dry/passable streets.
+                    ⚠️ Direct shortest path has {routeResponse.shortest_path_comparison.flooded_road_count} flooded road segment(s) (up to {Math.round(routeResponse.shortest_path_comparison.max_flood_depth_m * 100)} cm deep). Safe route detours to dry/passable streets.
                   </div>
                 )}
 
+                {routeResponse.shortest_path_comparison && !routeResponse.shortest_path_comparison.has_flooded_roads && (
+                  <div className="route-comparison-note">
+                    ℹ️ The shortest path crosses no flooded streets in this hazard, so the flood-safe route follows it and the detour delta is 0 m.
+                  </div>
+                )}
+
+                <div className="route-comparison-note">
+                  🗺️ Dashed grey = shortest path, solid coloured line = flood-safe route
+                  {routeResponse.shortest_path_comparison && Math.abs(routeResponse.total_distance_m - routeResponse.shortest_path_comparison.distance_m) < 0.5 ? ' (both coincide on this corridor)' : ''}.
+                  {' '}Hazard used: {routeResponse.provenance?.hazard_assessment || 'current flood hazard'}
+                </div>
+
                 {routeResponse.status === 'UNAVAILABLE' && (
                   <div className="route-unavailable-warning">
-                    ⛔ No dry or safely passable route exists for current flood inundation without crossing major flood barriers (depth ≥ 0.30 m).
+                    ⛔ No flood-safe diversion exists for this inundation — every alternative corridor also crosses a road at or above 30 cm depth.
+                    Only the dashed shortest path is drawn; it is not passable.
+                  </div>
+                )}
+
+                {routeResponse.status === 'NO_PATH_FOUND' && (
+                  <div className="route-unavailable-warning">
+                    ⚠️ These two points are not connected by the mapped road network in this pilot area, so neither a shortest nor a flood-safe route can be drawn.
                   </div>
                 )}
               </>
@@ -2729,28 +2903,33 @@ const FloodMap = ({ theme }: FloodMapProps = {}) => {
 
         {/* FLOOD DEPTH LEGEND (Bottom Right) */}
         <div className="flood-legend-card">
-          <div className="legend-heading">Modelled flood depth</div>
+          <div className="legend-heading">Modelled flood depth (cm)</div>
           <div className="legend-scale">
             <div className="legend-grade">
               <span className="grade-color" style={{ backgroundColor: '#ffeda0' }} />
-              <span className="grade-range">0.0 – 0.5 m</span>
+              <span className="grade-range">0 – 50 cm</span>
               <span className="grade-desc">Minor</span>
             </div>
             <div className="legend-grade">
               <span className="grade-color" style={{ backgroundColor: '#feb24c' }} />
-              <span className="grade-range">0.5 – 1.0 m</span>
+              <span className="grade-range">50 – 100 cm</span>
               <span className="grade-desc">Moderate</span>
             </div>
             <div className="legend-grade">
               <span className="grade-color" style={{ backgroundColor: '#f03b20' }} />
-              <span className="grade-range">1.0 – 2.0 m</span>
+              <span className="grade-range">100 – 200 cm</span>
               <span className="grade-desc">High</span>
             </div>
             <div className="legend-grade">
               <span className="grade-color" style={{ backgroundColor: '#bd0026' }} />
-              <span className="grade-range">2.0+ m</span>
+              <span className="grade-range">200+ cm</span>
               <span className="grade-desc">Severe</span>
             </div>
+          </div>
+          <div className="legend-note">
+            Depth bands of the modelled 30 m grid, shown in centimetres — the
+            same bands the map fills and the status card names. Classification
+            bands, not hazard standards or a safety claim.
           </div>
         </div>
 

@@ -28,7 +28,9 @@ const ScenarioPanel = ({
   ) => void;
   onDepthPolygons?: (polygons: { type: string; features: unknown[] } | null) => void;
   onRoadDepths?: (
-    depths: Record<string, { depth_cm: number; depth_m: number; flood_state: string }> | null,
+    depths:
+      | Record<string, { depth_cm: number | null; depth_m: number | null; water_depth_state: string }>
+      | null,
   ) => void;
 }) => {
   const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
@@ -166,15 +168,18 @@ const ScenarioPanel = ({
               <span className={`state-chip state-${currentState.toLowerCase()}`}>{currentState}</span>
             </div>
             <div className="depth-widget-value">
-              {currentMax !== null ? `${(currentMax / 100).toFixed(2)} m` : 'UNKNOWN'}
-              <span className="depth-widget-cm"> = {currentMax !== null ? `${Math.round(currentMax)} cm` : '—'}</span>
+              {currentMax !== null ? `${Math.round(currentMax)} cm` : 'UNKNOWN'}
             </div>
             <div className="depth-widget-meta">
               {result.scenario_id} • {fmtTime(currentStep.time_start)} • source: {currentStep.source_type}
             </div>
             {selectedRoadDepth && (
               <div className="depth-widget-selected">
-                Selected road {selectedRoad}: {selectedRoadDepth.depth_m.toFixed(2)} m ({selectedRoadDepth.flood_state})
+                Selected road {selectedRoad}:{' '}
+                {selectedRoadDepth.depth_cm === null
+                  ? 'UNKNOWN'
+                  : `${selectedRoadDepth.depth_cm.toFixed(0)} cm`}{' '}
+                ({selectedRoadDepth.water_depth_state})
               </div>
             )}
             <div className="depth-widget-scale">
@@ -198,7 +203,7 @@ const ScenarioPanel = ({
                   onClick={() => setTimestep(i)}
                   title={`${s.max_depth_cm} cm · ${s.flood_state}`}
                 >
-                  {s.max_depth_cm >= 100 ? '>1m' : s.max_depth_cm.toFixed(0)}
+                  {s.max_depth_cm >= 100 ? '>100' : s.max_depth_cm.toFixed(0)}
                 </button>
               ))}
             </div>
@@ -336,7 +341,7 @@ const ScenarioPanel = ({
           <div className="delhi-section flood-timeline-panel">
             <div className="delhi-section-head timeline-header timeline-header">
               <span className="delhi-section-title timeline-heading timeline-heading">ROAD-SEGMENT FLOOD DEPTH</span>
-              <span className="delhi-section-hint">click a row; UNKNOWN is never 0 m</span>
+              <span className="delhi-section-hint">click a row; UNKNOWN is never 0 cm</span>
             </div>
             <div className="route-segment-list">
               {roadEntries.slice(0, 10).map(([rid, d]) => (
@@ -347,9 +352,9 @@ const ScenarioPanel = ({
                 >
                   <span className="mono">{rid}</span>
                   <span className="mono">
-                    {d.flood_state === 'UNKNOWN' ? 'UNKNOWN' : `${d.depth_m.toFixed(2)} m (${d.depth_cm.toFixed(0)} cm)`}
+                    {d.depth_cm === null ? 'UNKNOWN' : `${d.depth_cm.toFixed(0)} cm`}
                   </span>
-                  <span className={`state-chip state-${d.flood_state.toLowerCase()}`}>{d.flood_state}</span>
+                  <span className={`state-chip state-${d.water_depth_state.toLowerCase()}`}>{d.water_depth_state}</span>
                 </button>
               ))}
               {roadEntries.length > 10 && (

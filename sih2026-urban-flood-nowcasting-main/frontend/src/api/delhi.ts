@@ -1120,7 +1120,11 @@ export interface ScenarioMember {
   steps: ScenarioStep[];
   max_depth_cm_traj: number[];
   edge_depths: Record<string, { depth_min_cm: number | null; depth_max_cm: number | null; status: string; reason: string }>;
-  road_depths: Record<string, { depth_cm: number; depth_m: number; flood_state: string; source_type: string }>;
+  // Road segments carry `water_depth_state` (classify_depth_cm); only surface
+  // cells/steps use `flood_state`.
+  // depth_cm is null when a segment midpoint falls outside the 45 m match
+  // distance — UNKNOWN is never reported as 0 cm.
+  road_depths: Record<string, { depth_cm: number | null; depth_m: number | null; water_depth_state: string; source_type: string }>;
   drainage_loading: {
     edge_id: string;
     node_id: string;

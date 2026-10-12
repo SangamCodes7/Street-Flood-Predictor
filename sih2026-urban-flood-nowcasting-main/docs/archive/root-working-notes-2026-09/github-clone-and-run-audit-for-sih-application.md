@@ -1,4 +1,4 @@
-# GitHub Clone-and-Run Audit for SIH Application
+# GitHub Clone-and-Run Audit for  Application
 
 ## 1. Required Prerequisites
 
